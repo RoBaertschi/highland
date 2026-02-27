@@ -24,5 +24,6 @@ int main(int argc, char **argv) {
     }
 
     printf("This is project " PROJECT_NAME ".\n");
+    log_fatalf("Fuck");
     return 0;
 }

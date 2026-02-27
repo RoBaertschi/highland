@@ -1,4 +1,5 @@
 #include "highland.hpp"
+#include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@ enum class Log_Level {
     Info,
     Warning,
     Error,
+    Fatal,
     _Max,
 };
 
@@ -19,12 +21,14 @@ void vlogf(Log_Level level, char const* format, va_list list) {
         "\x1b[32m[INF]\x1b[0m ",
         "\x1b[33m[WRN]\x1b[0m ",
         "\x1b[31m[ERR]\x1b[0m ",
+        "\x1b[31m[FTL]\x1b[0m ",
 
         // No color variants
         "[DBG] ",
         "[INF] ",
         "[WRN] ",
         "[ERR] ",
+        "[FTL] ",
     };
 
     usize idx = (usize)level + (!use_color * (usize)Log_Level::_Max);
@@ -33,6 +37,10 @@ void vlogf(Log_Level level, char const* format, va_list list) {
 
     vdprintf(STDERR_FILENO, format, list);
     dprintf(STDERR_FILENO, "\n");
+
+    if (level == Log_Level::Fatal) {
+        exit(1);
+    }
 }
 
 void logf(Log_Level level, char const* format, ...) {
@@ -73,4 +81,12 @@ void log_errorf(char const* format, ...) {
     defer(va_end(a));
 
     vlogf(Log_Level::Error, format, a);
+}
+
+void log_fatalf(char const* format, ...) {
+    va_list a;
+    va_start(a, format);
+    defer(va_end(a));
+
+    vlogf(Log_Level::Fatal, format, a);
 }
