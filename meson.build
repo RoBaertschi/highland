@@ -8,6 +8,9 @@ project(
 
 dependencies = [
   dependency('wayland-server', required: true),
+  dependency('libudev', required: true),
+  dependency('libdrm', required: true),
+  dependency('libseat', required: true),
 ]
 
 wayland_scanner = find_program('wayland-scanner', required: true)

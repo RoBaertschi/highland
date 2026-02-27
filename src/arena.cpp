@@ -228,7 +228,27 @@ String arena_clone_string(Arena *arena, Slice<u8> s) {
         slice_copy(copy, s);
     }
 
-    return String { s.ptr, s.len };
+    return String { copy.ptr, copy.len };
+}
+
+String arena_clone_string(Arena *arena, String s) {
+    auto copy = arena_alloc_slice<u8>(arena, s.len);
+    if (copy.len > 0) {
+        Slice<u8 const> s2 = { s.ptr, s.len };
+        slice_copy(copy, s2);
+    }
+
+    return String { copy.ptr, copy.len };
+}
+
+char const* arena_clone_cstring(Arena *arena, String s) {
+    auto copy = arena_alloc_slice<u8>(arena, s.len + 1);
+    if (copy.len > 0) {
+        Slice<u8 const> s2 = { s.ptr, s.len };
+        slice_copy(copy, s2);
+        copy[copy.len-1] = 0;
+    }
+    return cast(char const*)copy.ptr;
 }
 
 struct Arena_Temp {
@@ -241,6 +261,37 @@ struct Arena_Temp {
 };
 
 Arena_Temp arena_temp_guard(Arena *arena) {
+    return Arena_Temp {
+        arena,
+        arena->used,
+    };
+}
+
+#define TEMP_ARENA_COUNT 2
+
+thread_local Arena temp_arenas[TEMP_ARENA_COUNT];
+
+Arena *temp_arena_get(Arena **collisions, isize collisions_count) {
+    for (isize i = 0; i < TEMP_ARENA_COUNT; i++) {
+        b32 found = false;
+        for (isize j = 0; j < collisions_count; j++) {
+            if (collisions[j] == &temp_arenas[i]) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            return &temp_arenas[i];
+        }
+    }
+
+    assert(false, "Out of temp arenas.");
+    return NULL;
+}
+
+Arena_Temp temp_get_guard(Arena **collisions, isize collisions_count) {
+    Arena *arena = temp_arena_get(collisions, collisions_count);
     return Arena_Temp {
         arena,
         arena->used,

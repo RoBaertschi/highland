@@ -16,6 +16,20 @@ struct String {
     String() = default;
     String(u8 const *ptr, isize len) : ptr(ptr), len(len) {};
     String(char const* str) : ptr(cast(u8 const *)str), len(strlen(str)) {}
+
+    bool operator ==(String const& other) {
+        if (len != other.len) {
+            return false;
+        }
+
+        for (isize i = 0; i < len; i++) {
+            if (other.ptr[i] != ptr[i]) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 };
 
 internal void string_print(String s, int fd);
@@ -61,6 +75,24 @@ template <typename T>
 struct Slice {
     T     *ptr;
     isize len;
+
+    T& operator[](isize index) {
+        ASSERT(0 <= index && index < len);
+        return ptr[index];
+    }
+
+    T const operator[](isize index) const {
+        ASSERT(0 <= index && index < len);
+        return ptr[index];
+    }
+
+    T *begin() noexcept {
+        return ptr;
+    }
+
+    T *end() noexcept {
+        return ptr + len;
+    }
 };
 
 template <typename T>
@@ -84,7 +116,22 @@ Slice<T> slice(Slice<T> s, isize start, isize end) {
 
 template <typename T>
 isize slice_copy(Slice<T> to, Slice<T> from) {
-    isize n = max(to.len - from.len, (isize)(0));
+    isize n = to.len;
+    if (to.len > from.len) {
+        n = from.len;
+    }
+    if (n > 0) {
+        memcpy(to.ptr, from.ptr, n);
+    }
+    return n;
+}
+
+template <typename T>
+isize slice_copy(Slice<T> to, Slice<T const> from) {
+    isize n = to.len;
+    if (to.len > from.len) {
+        n = from.len;
+    }
     if (n > 0) {
         memcpy(to.ptr, from.ptr, n);
     }
