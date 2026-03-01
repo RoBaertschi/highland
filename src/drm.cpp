@@ -97,6 +97,11 @@ internal void drm_do_stuff(Drm_Device &device) {
     }
     defer(close(fd));
 
+    if (!drmIsKMS(fd)) {
+        log_errorf("Device does not support kernel mode setting, which is requried for wayland.");
+        return;
+    }
+
     log_infof("Opened %s", path);
     auto res = drmModeGetResources(fd);
     defer(drmModeFreeResources(res));

@@ -12,6 +12,8 @@ int main(int argc, char **argv) {
     auto udev = udev_new();
     Arena arena = {};
 
+    test(&arena, STDOUT_FILENO);
+
     auto devices = drm_find_gpus(udev, &arena);
     for(auto device = devices; device != NULL; device = device->next) {
         log_infof("Device in list %s", device->path);
