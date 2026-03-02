@@ -1,5 +1,5 @@
 #include <libudev.h>
-#include <stdio.h>
+#include <fmt/format.h>
 
 #include "utils.cpp"
 #include "arena.cpp"
@@ -12,20 +12,20 @@ int main(int argc, char **argv) {
     auto udev = udev_new();
     Arena arena = {};
 
-    test(&arena, STDOUT_FILENO);
+    log_init();
 
     auto devices = drm_find_gpus(udev, &arena);
     for(auto device = devices; device != NULL; device = device->next) {
-        log_infof("Device in list %s", device->path);
+        log_infof("Device in list {}", device->path);
         drm_do_stuff(*device);
     }
 
     if (argc != 1) {
-        printf("%s takes no arguments.\n", argv[0]);
+        fmt::print("{} takes no arguments.\n", argv[0]);
         return 1;
     }
 
-    printf("This is project " PROJECT_NAME ".\n");
+    fmt::print("This is project {}.\n", PROJECT_NAME);
     log_fatalf("Fuck");
     return 0;
 }

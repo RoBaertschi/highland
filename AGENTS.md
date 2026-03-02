@@ -7,7 +7,7 @@ This repo is intentionally small and uses a "unity" build (one translation unit)
 - Meson (preferred):
   - Configure: `meson setup builddir`
   - Build: `meson compile -C builddir`
-  - Test: `meson test -C builddir`
+  - Tests: none wired up currently (no `test(...)` targets in `meson.build`).
 - Direct compile (quick smoke only):
   - Prefer Meson; the build generates Wayland protocol sources via `wayland-scanner`.
 
@@ -38,6 +38,13 @@ This repo is intentionally small and uses a "unity" build (one translation unit)
 - Use project types: `isize`, `usize`, `u8`, etc.
 - Use `ASSERT(...)` for invariants.
 - Prefer ASCII source.
+
+## Logging
+
+- Logging uses `{fmt}` formatting (curly braces), not `printf`-style `%` specifiers.
+  - Call sites should use `log_debugf("value {}", x)` etc.
+- Colorized prefixes in `src/log.cpp` are enabled only when `isatty(STDERR_FILENO)`.
+- `log_fatalf(...)` terminates the process with exit code 1.
 
 ## Arena / Memory Blocks
 

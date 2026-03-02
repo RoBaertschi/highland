@@ -1,3 +1,5 @@
+#include "fmt/base.h"
+#include "fmt/format.h"
 #include "highland.hpp"
 
 #include <unistd.h>
@@ -31,6 +33,10 @@ struct String {
         return true;
     }
 };
+
+fmt::string_view format_as(String s) {
+    return fmt::string_view{ cast(char*)s.ptr, cast(usize)s.len };
+}
 
 internal void string_print(String s, int fd);
 
@@ -136,4 +142,9 @@ isize slice_copy(Slice<T> to, Slice<T const> from) {
         memcpy(to.ptr, from.ptr, n);
     }
     return n;
+}
+
+template <typename T>
+void slice_zero(Slice<T> slice) {
+    memset(slice.ptr, 0, slice.len * sizeof(T));
 }

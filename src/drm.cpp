@@ -41,10 +41,10 @@ internal Drm_Device *drm_find_gpus(udev *udev, Arena *arena) {
 #endif
     udev_enumerate_add_match_sysname(enumerate, DRM_PRIMARY_MINOR_NAME "[0-9]*");
 
-     if (udev_enumerate_scan_devices(enumerate) < 0) {
-         log_errorf("Could not scan for GPU devices.");
-          return NULL;
-     }
+    if (udev_enumerate_scan_devices(enumerate) < 0) {
+        log_errorf("Could not scan for GPU devices.");
+        return NULL;
+    }
 
     Drm_Device *current_device = NULL;
     Drm_Device *start_device = NULL;
@@ -53,9 +53,9 @@ internal Drm_Device *drm_find_gpus(udev *udev, Arena *arena) {
         auto path = udev_list_entry_get_name(entry);
         auto device = udev_device_new_from_syspath(udev, path);
         if (!device) {
-           log_warningf("Skipping device %s", path);
+            log_warnf("Skipping device {}", path);
             continue;
-         }
+        }
 
         // String seat = udev_device_get_property_value(device, "ID_SEAT");
         // if (!seat) {
@@ -69,7 +69,7 @@ internal Drm_Device *drm_find_gpus(udev *udev, Arena *arena) {
             boot_vga = String{id} == String{"1"};
         }
 
-        log_infof("Found %s", path);
+        log_infof("Found {}", path);
 
         if (!start_device) {
             current_device = start_device = arena_alloc<Drm_Device>(arena);
@@ -92,7 +92,7 @@ internal void drm_do_stuff(Drm_Device &device) {
     char const *path = udev_device_get_devnode(device.device);
     int fd = open(path, O_RDWR, O_CLOEXEC);
     if (fd < 0) {
-        log_errorf("Could not open device(%s): %s", path, strerror(errno));
+        log_errorf("Could not open device({}): {}", path, strerror(errno));
         return;
     }
     defer(close(fd));
@@ -102,7 +102,7 @@ internal void drm_do_stuff(Drm_Device &device) {
         return;
     }
 
-    log_infof("Opened %s", path);
+    log_infof("Opened {}", path);
     auto res = drmModeGetResources(fd);
     defer(drmModeFreeResources(res));
 
@@ -112,10 +112,10 @@ internal void drm_do_stuff(Drm_Device &device) {
 
         switch (connector->connection) {
             case DRM_MODE_CONNECTED:
-                log_infof("Connected", connector->count_modes, connector->modes->name);
+                log_infof("Connected");
                 for (isize j = 0; j < connector->count_modes; j++) {
                     auto mode = connector->modes[j];
-                    log_debugf("-> %s %d %d", mode.name, mode.vrefresh, mode.type);
+                    log_debugf("-> {} {} {}", mode.name, mode.vrefresh, mode.type);
                 }
                 break;
             case DRM_MODE_DISCONNECTED:      log_infof("Disconnected"); break;

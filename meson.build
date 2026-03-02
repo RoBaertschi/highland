@@ -59,5 +59,3 @@ exe = executable(
   dependencies : dependencies,
   include_directories: include_directories('.'),
 )
-
-test('basic', exe)

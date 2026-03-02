@@ -29,6 +29,7 @@ typedef float  f32;
 typedef double f64;
 
 #define internal static
+#define function_static static
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
