@@ -25,7 +25,7 @@ struct Fd_Output_Iterator {
     Fd_Output_Iterator& operator++(int) { return *this; }
 };
 
-void fd_output_iterator_flush(Fd_Output_Iterator &iter) {
+internal void fd_output_iterator_flush(Fd_Output_Iterator &iter) {
     write(iter.fd, iter.buffer.ptr, min(iter.buffer.len, iter.i));
     iter.i = 0;
     slice_zero(iter.buffer);
@@ -60,7 +60,7 @@ internal void log_init() {
     slice_zero(log_output.buffer);
 }
 
-void vlogf(Log_Level level, String format, fmt::format_args args) {
+internal void vlogf(Log_Level level, String format, fmt::format_args args) {
 
     function_static b32 use_color = 2;
     if (use_color == 2) {
@@ -82,7 +82,7 @@ void vlogf(Log_Level level, String format, fmt::format_args args) {
         "[FTL] ",
     };
 
-    usize idx = (usize)level + (!use_color * (usize)Log_Level::_Max);
+    usize idx = (usize)level + (!use_color * cast(usize)Log_Level::_Max);
     auto s = labels[idx];
     log_output = fmt::format_to(log_output, "{}", s);
 
@@ -90,7 +90,6 @@ void vlogf(Log_Level level, String format, fmt::format_args args) {
 
     *log_output++ = '\n';
     fd_output_iterator_flush(log_output);
-    // syncfs(log_output.fd);
 
     if (level == Log_Level::Fatal) {
         exit(1);
@@ -99,41 +98,41 @@ void vlogf(Log_Level level, String format, fmt::format_args args) {
 
 
 template<typename ...Args>
-void logf(Log_Level level, String format, Args ...args) {
+internal void logf(Log_Level level, String format, Args ...args) {
     auto format_args = fmt::make_format_args(args...);
     vlogf(level, format, format_args);
 }
 
 template<typename ...Args>
-void log_debugf(String format, Args&& ...args) {
+internal void log_debugf(String format, Args&& ...args) {
     auto format_args = fmt::make_format_args(args...);
 
     vlogf(Log_Level::Debug, format, format_args);
 }
 
 template<typename ...Args>
-void log_infof(String format, Args&& ...args) {
+internal void log_infof(String format, Args&& ...args) {
     auto format_args = fmt::make_format_args(args...);
 
     vlogf(Log_Level::Info, format, format_args);
 }
 
 template<typename ...Args>
-void log_warnf(String format, Args&& ...args) {
+internal void log_warnf(String format, Args&& ...args) {
     auto format_args = fmt::make_format_args(args...);
 
     vlogf(Log_Level::Warning, format, format_args);
 }
 
 template<typename ...Args>
-void log_errorf(String format, Args&& ...args) {
+internal void log_errorf(String format, Args&& ...args) {
     auto format_args = fmt::make_format_args(args...);
 
     vlogf(Log_Level::Error, format, format_args);
 }
 
 template<typename ...Args>
-void log_fatalf(String format, Args&& ...args) {
+internal void log_fatalf(String format, Args&& ...args) {
     auto format_args = fmt::make_format_args(args...);
 
     vlogf(Log_Level::Fatal, format, format_args);
