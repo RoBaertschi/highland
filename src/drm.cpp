@@ -102,6 +102,25 @@ internal void drm_do_stuff(Drm_Device &device) {
         return;
     }
 
+    int setMasterResult = drmSetMaster(fd);
+    if (setMasterResult) {
+        log_errorf("Could not set drm master: {}", strerror(errno));
+        return;
+    }
+
+    b32 atomicSupported = true;
+    int atomicSupportedResult = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
+    if (atomicSupportedResult) {
+        log_infof("Atomic mode setting is not supported: {}", strerror(errno));
+        atomicSupported = false;
+    }
+
+    int universalPlanesResult = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    if (universalPlanesResult) {
+        log_errorf("Universal planes not supported: {}", strerror(errno));
+        return;
+    }
+
     log_infof("Opened {}", path);
     auto res = drmModeGetResources(fd);
     defer(drmModeFreeResources(res));
@@ -111,13 +130,45 @@ internal void drm_do_stuff(Drm_Device &device) {
         defer(drmModeFreeConnector(connector));
 
         switch (connector->connection) {
-            case DRM_MODE_CONNECTED:
+            case DRM_MODE_CONNECTED: {
                 log_infof("Connected");
                 for (isize j = 0; j < connector->count_modes; j++) {
                     auto mode = connector->modes[j];
-                    log_debugf("-> {} {} {}", mode.name, mode.vrefresh, mode.type);
+                    log_debugf("-> {} {} {} {:08b}", mode.name, mode.vrefresh, mode.type, mode.flags);
+
+                    if (mode.type & DRM_MODE_TYPE_PREFERRED) {
+                        log_debugf("--> Preferred");
+                    }
+                    if (mode.type & DRM_MODE_TYPE_USERDEF) {
+                        log_debugf("--> Userdef");
+                    }
+                    if (mode.type & DRM_MODE_TYPE_DRIVER) {
+                        log_debugf("--> Driver");
+                    }
+
+                    if (mode.flags & DRM_MODE_FLAG_PHSYNC) {
+                        log_debugf("--> f: PHSYNC");
+                    }
+                    if (mode.flags & DRM_MODE_FLAG_NHSYNC) {
+                        log_debugf("--> f: NHSYNC");
+                    }
+                    if (mode.flags & DRM_MODE_FLAG_PVSYNC) {
+                        log_debugf("--> f: PVSYNC");
+                    }
+                    if (mode.flags & DRM_MODE_FLAG_NVSYNC) {
+                        log_debugf("--> f: NVSYNC");
+                    }
+                }
+
+                auto properties = drmModeObjectGetProperties(fd, res->connectors[i], DRM_MODE_OBJECT_CONNECTOR);
+                if (properties) {
+                    for (isize j = 0; j < properties->count_props; j++) {
+                        auto property = drmModeGetProperty(fd, properties->props[j]);
+                        log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+                    }
                 }
                 break;
+            }
             case DRM_MODE_DISCONNECTED:      log_infof("Disconnected"); break;
             case DRM_MODE_UNKNOWNCONNECTION: log_infof("Unknown"); break;
         }
