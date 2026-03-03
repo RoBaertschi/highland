@@ -7,6 +7,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <libseat.h>
+#include <gbm.h>
 
 #include "highland.hpp"
 
@@ -21,6 +22,24 @@ struct Drm_Device {
     String      path;
     b32         boot_vga;
 };
+
+struct Drm_Connector {
+    Drm_Connector       *next;
+    drmModeConnectorPtr connector;
+    u32                 crtc_property;
+};
+
+struct Drm_Crtc {
+    Drm_Crtc       *next;
+    drmModeCrtcPtr crtc;
+    u32            active_property;
+    u32            mode_id_property;
+};
+
+struct Drm_Plane {
+    
+};
+
 
 // Mostly based on https://github.com/hyprwm/aquamarine/blob/7f9eb087703ec4acc6b288d02fa9ea3db803cd3d/src/backend/drm/DRM.cpp
 internal Drm_Device *drm_find_gpus(udev *udev, Arena *arena) {
@@ -125,12 +144,52 @@ internal void drm_do_stuff(Drm_Device &device) {
     auto res = drmModeGetResources(fd);
     defer(drmModeFreeResources(res));
 
+    Drm_Connector *connected_connectors = NULL;
+    Drm_Crtc      *crtcs                = NULL;
+
+    for (isize i = 0; i < res->count_crtcs; i++) {
+        auto crtc = drmModeGetCrtc(fd, res->crtcs[i]);
+        defer(drmModeFreeCrtc(crtc));
+        auto properties = drmModeObjectGetProperties(fd, res->crtcs[i], DRM_MODE_OBJECT_CRTC);
+        defer(drmModeFreeObjectProperties(properties));
+        if (properties) {
+            auto element = arena_alloc<Drm_Crtc>(temp.arena);
+            ll_insert_at_head(&crtcs, element);
+
+            for (isize j = 0; j < properties->count_props; j++) {
+                auto property = drmModeGetProperty(fd, properties->props[j]);
+                defer(drmModeFreeProperty(property));
+                log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+
+                String property_name = property->name;
+                if (property_name == "ACTIVE") {
+                    element->active_property = property->prop_id;
+                }
+                if (property_name == "MODE_ID") {
+                    element->mode_id_property = property->prop_id;
+                }
+            }
+
+            if (!element->active_property || !element->mode_id_property) {
+                log_errorf("Missing crtcs properties. active_property={}, mode_id_property={}", element->active_property, element->mode_id_property);
+                ll_remove_at_head(&crtcs);
+            }
+        }
+    }
+
     for (isize i = 0; i < res->count_connectors; i++) {
         auto connector = drmModeGetConnector(fd, res->connectors[i]);
-        defer(drmModeFreeConnector(connector));
+        defer({
+            if (connector->connection != DRM_MODE_CONNECTED) {
+                drmModeFreeConnector(connector);
+            }
+        });
 
         switch (connector->connection) {
             case DRM_MODE_CONNECTED: {
+                Drm_Connector *element = arena_alloc<Drm_Connector>(temp.arena);
+                element->connector = connector;
+                ll_insert_at_head(&connected_connectors, element);
                 log_infof("Connected");
                 for (isize j = 0; j < connector->count_modes; j++) {
                     auto mode = connector->modes[j];
@@ -161,11 +220,21 @@ internal void drm_do_stuff(Drm_Device &device) {
                 }
 
                 auto properties = drmModeObjectGetProperties(fd, res->connectors[i], DRM_MODE_OBJECT_CONNECTOR);
+                defer(drmModeFreeObjectProperties(properties));
                 if (properties) {
                     for (isize j = 0; j < properties->count_props; j++) {
                         auto property = drmModeGetProperty(fd, properties->props[j]);
+                        defer(drmModeFreeProperty(property));
                         log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+                        if (String{property->name} == "CRTC_ID") {
+                            element->crtc_property = property->prop_id;
+                        }
                     }
+                }
+
+                if (!element->crtc_property) {
+                    log_errorf("Missing CRTC_ID");
+                    ll_remove_at_head(&connected_connectors);
                 }
                 break;
             }

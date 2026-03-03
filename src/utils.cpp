@@ -148,3 +148,37 @@ template <typename T>
 void slice_zero(Slice<T> slice) {
     memset(slice.ptr, 0, slice.len * sizeof(T));
 }
+
+template <typename T>
+void ll_insert_at_head(T** head, T* new_element) {
+    if (*head == NULL) {
+        *head = new_element;
+    } else {
+        new_element->next = *head;
+        *head = new_element;
+    }
+}
+
+template <typename T>
+void ll_insert_after(T* where, T* new_element) {
+    new_element->next = where;
+    where->next       = new_element;
+}
+
+template <typename T>
+T* ll_remove_next(T* prev) {
+    T* saved = prev->next;
+    prev->next = prev->next->next;
+    return saved;
+}
+
+template <typename T>
+T* ll_remove_at_head(T** head) {
+    if (*head == NULL) {
+        return NULL;
+    }
+
+    T* saved = *head;
+    *head = saved->next;
+    return saved;
+}

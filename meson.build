@@ -12,6 +12,7 @@ dependencies = [
   dependency('libdrm', required: true),
   dependency('libseat', required: true),
   dependency('fmt', required: true),
+  dependency('gbm', required: true),
 ]
 
 wayland_scanner = find_program('wayland-scanner', required: true)
