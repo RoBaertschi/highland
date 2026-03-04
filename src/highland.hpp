@@ -28,11 +28,15 @@ typedef u64 b64;
 typedef float  f32;
 typedef double f64;
 
-#define internal static
+#define global          static
+#define internal        static
+#define readonly        const
 #define function_static static
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+
+#define ARRAY_SIZE(a) (isize)(sizeof(a) / sizeof(*(a)))
 
 #define cast(T) (T)
 
