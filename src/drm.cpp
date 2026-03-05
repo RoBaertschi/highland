@@ -117,6 +117,10 @@ struct Drm_Crtc {
     X(SRC_Y,           "SRC_Y")          \
     X(SRC_W,           "SRC_W")          \
     X(SRC_H,           "SRC_H")          \
+    X(CRTC_X,          "CRTC_X")         \
+    X(CRTC_Y,          "CRTC_Y")         \
+    X(CRTC_W,          "CRTC_W")         \
+    X(CRTC_H,          "CRTC_H")         \
     X(IN_FORMATS,      "IN_FORMATS")     \
     X(TYPE,            "type")           \
     X(IN_FENCE_FD,     "IN_FENCE_FD")    \
@@ -225,21 +229,21 @@ internal void drm_do_stuff(Drm_Device &device) {
         return;
     }
 
-    int setMasterResult = drmSetMaster(fd);
-    if (setMasterResult) {
+    int set_master_result = drmSetMaster(fd);
+    if (set_master_result) {
         log_errorf("Could not set drm master: {}", strerror(errno));
         return;
     }
 
-    b32 atomicSupported = true;
-    int atomicSupportedResult = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
-    if (atomicSupportedResult) {
+    b32 atomic_supported = true;
+    int atomic_supported_result = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
+    if (atomic_supported_result) {
         log_infof("Atomic mode setting is not supported: {}", strerror(errno));
-        atomicSupported = false;
+        atomic_supported = false;
     }
 
-    int universalPlanesResult = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-    if (universalPlanesResult) {
+    int universal_planes_result = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    if (universal_planes_result) {
         log_errorf("Universal planes not supported: {}", strerror(errno));
         return;
     }
@@ -248,38 +252,60 @@ internal void drm_do_stuff(Drm_Device &device) {
     auto res = drmModeGetResources(fd);
     defer(drmModeFreeResources(res));
 
+    auto plane_res = drmModeGetPlaneResources(fd);
+    defer(drmModeFreePlaneResources(plane_res));
+
     Drm_Connector *connected_connectors = NULL;
     Drm_Crtc      *crtcs                = NULL;
+    Drm_Plane     *planes               = NULL;
+
+    u32 crtc_usable = 0;
+    for (isize i = 0; i < res->count_encoders; i++) {
+        auto encoder = drmModeGetEncoder(fd, res->encoders[i]);
+        defer(drmModeFreeEncoder(encoder));
+        crtc_usable |= encoder->possible_crtcs;
+    }
+
+    log_debugf("Usable crtcs {:0b}", crtc_usable);
 
     for (isize i = 0; i < res->count_crtcs; i++) {
-        auto crtc = drmModeGetCrtc(fd, res->crtcs[i]);
-        defer(drmModeFreeCrtc(crtc));
+        if (!(crtc_usable & (1 << i))) {
+            log_infof("Crtc {} skipped, no supported encoder found.", i);
+            continue;
+        }
+
         auto properties = drmModeObjectGetProperties(fd, res->crtcs[i], DRM_MODE_OBJECT_CRTC);
         defer(drmModeFreeObjectProperties(properties));
-        if (properties) {
-            auto element = arena_alloc<Drm_Crtc>(temp.arena);
-            ll_insert_at_head(&crtcs, element);
 
-            for (isize j = 0; j < properties->count_props; j++) {
-                auto property = drmModeGetProperty(fd, properties->props[j]);
-                defer(drmModeFreeProperty(property));
-                log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+        if (!properties) {
+            continue;
+        }
 
-                Drm_Crtc_Property found_property = drm_property_name_map_find(drm_crtc_property_name_map, ARRAY_SIZE(drm_crtc_property_name_map), String{property->name});
+        auto crtc    = drmModeGetCrtc(fd, res->crtcs[i]);
+        auto element = arena_alloc<Drm_Crtc>(temp.arena);
+        ll_insert_at_head(&crtcs, element);
+        element->crtc = crtc;
 
-                if (found_property) {
-                    element->properties[cast(usize)found_property] = property->prop_id;
-                }
+        for (isize j = 0; j < properties->count_props; j++) {
+            auto property = drmModeGetProperty(fd, properties->props[j]);
+            defer(drmModeFreeProperty(property));
+            log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+
+            Drm_Crtc_Property found_property = drm_property_name_map_find(drm_crtc_property_name_map, ARRAY_SIZE(drm_crtc_property_name_map), String{property->name});
+
+            if (found_property) {
+                element->properties[cast(usize)found_property] = property->prop_id;
             }
+        }
 
-            if (!element->properties[DRM_CRTC_PROPERTY_ACTIVE] || !element->properties[DRM_CRTC_PROPERTY_MODE_ID]) {
-                log_errorf(
-                    "Missing crtcs properties. active_property={}, mode_id_property={}",
-                    element->properties[DRM_CRTC_PROPERTY_ACTIVE],
-                    element->properties[DRM_CRTC_PROPERTY_MODE_ID]);
+        if (!element->properties[DRM_CRTC_PROPERTY_ACTIVE] || !element->properties[DRM_CRTC_PROPERTY_MODE_ID]) {
+            log_errorf(
+                "Missing crtcs properties. active_property={}, mode_id_property={}",
+                element->properties[DRM_CRTC_PROPERTY_ACTIVE],
+                element->properties[DRM_CRTC_PROPERTY_MODE_ID]);
 
-                ll_remove_at_head(&crtcs);
-            }
+            auto drm_crtc = ll_remove_at_head(&crtcs);
+            drmModeFreeCrtc(drm_crtc->crtc);
         }
     }
 
@@ -292,63 +318,100 @@ internal void drm_do_stuff(Drm_Device &device) {
         });
 
         switch (connector->connection) {
-            case DRM_MODE_CONNECTED: {
-                Drm_Connector *element = arena_alloc<Drm_Connector>(temp.arena);
-                element->connector = connector;
-                ll_insert_at_head(&connected_connectors, element);
-                log_infof("Connected");
-                for (isize j = 0; j < connector->count_modes; j++) {
-                    auto mode = connector->modes[j];
-                    log_debugf("-> {} {} {} {:08b}", mode.name, mode.vrefresh, mode.type, mode.flags);
+        case DRM_MODE_CONNECTED: {
+            auto properties = drmModeObjectGetProperties(fd, res->connectors[i], DRM_MODE_OBJECT_CONNECTOR);
+            defer(drmModeFreeObjectProperties(properties));
 
-                    if (mode.type & DRM_MODE_TYPE_PREFERRED) {
-                        log_debugf("--> Preferred");
-                    }
-                    if (mode.type & DRM_MODE_TYPE_USERDEF) {
-                        log_debugf("--> Userdef");
-                    }
-                    if (mode.type & DRM_MODE_TYPE_DRIVER) {
-                        log_debugf("--> Driver");
-                    }
+            if (!properties) {
+                continue;
+            }
 
-                    if (mode.flags & DRM_MODE_FLAG_PHSYNC) {
-                        log_debugf("--> f: PHSYNC");
-                    }
-                    if (mode.flags & DRM_MODE_FLAG_NHSYNC) {
-                        log_debugf("--> f: NHSYNC");
-                    }
-                    if (mode.flags & DRM_MODE_FLAG_PVSYNC) {
-                        log_debugf("--> f: PVSYNC");
-                    }
-                    if (mode.flags & DRM_MODE_FLAG_NVSYNC) {
-                        log_debugf("--> f: NVSYNC");
-                    }
+            Drm_Connector *element = arena_alloc<Drm_Connector>(temp.arena);
+            element->connector = connector;
+            ll_insert_at_head(&connected_connectors, element);
+            log_infof("Connected");
+            for (isize j = 0; j < connector->count_modes; j++) {
+                auto mode = connector->modes[j];
+                log_debugf("-> {} {} {} {:08b}", mode.name, mode.vrefresh, mode.type, mode.flags);
+
+                if (mode.type & DRM_MODE_TYPE_PREFERRED) {
+                    log_debugf("--> Preferred");
+                }
+                if (mode.type & DRM_MODE_TYPE_USERDEF) {
+                    log_debugf("--> Userdef");
+                }
+                if (mode.type & DRM_MODE_TYPE_DRIVER) {
+                    log_debugf("--> Driver");
                 }
 
-                auto properties = drmModeObjectGetProperties(fd, res->connectors[i], DRM_MODE_OBJECT_CONNECTOR);
-                defer(drmModeFreeObjectProperties(properties));
-                if (properties) {
-                    for (isize j = 0; j < properties->count_props; j++) {
-                        auto property = drmModeGetProperty(fd, properties->props[j]);
-                        defer(drmModeFreeProperty(property));
-                        log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
-
-                        Drm_Connector_Property found_property = drm_property_name_map_find(drm_connector_property_name_map, ARRAY_SIZE(drm_connector_property_name_map), String{property->name});
-
-                        if (found_property) {
-                            element->properties[found_property] = property->prop_id;
-                        }
-                    }
+                if (mode.flags & DRM_MODE_FLAG_PHSYNC) {
+                    log_debugf("--> f: PHSYNC");
                 }
-
-                if (!element->properties[DRM_CONNECTOR_PROPERTY_CRTC_ID]) {
-                    log_errorf("Missing CRTC_ID");
-                    ll_remove_at_head(&connected_connectors);
+                if (mode.flags & DRM_MODE_FLAG_NHSYNC) {
+                    log_debugf("--> f: NHSYNC");
                 }
+                if (mode.flags & DRM_MODE_FLAG_PVSYNC) {
+                    log_debugf("--> f: PVSYNC");
+                }
+                if (mode.flags & DRM_MODE_FLAG_NVSYNC) {
+                    log_debugf("--> f: NVSYNC");
+                }
+            }
+
+            for (isize j = 0; j < properties->count_props; j++) {
+                auto property = drmModeGetProperty(fd, properties->props[j]);
+                defer(drmModeFreeProperty(property));
+                log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+
+                Drm_Connector_Property found_property = drm_property_name_map_find(drm_connector_property_name_map, ARRAY_SIZE(drm_connector_property_name_map), String{property->name});
+
+                if (found_property) {
+                    element->properties[found_property] = property->prop_id;
+                    log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
+                }
+            }
+
+            if (element->properties[DRM_CONNECTOR_PROPERTY_CRTC_ID]) {
                 break;
             }
-            case DRM_MODE_DISCONNECTED:      log_infof("Disconnected"); break;
-            case DRM_MODE_UNKNOWNCONNECTION: log_infof("Unknown"); break;
+
+            log_errorf("Missing CRTC_ID");
+            auto drm_connector = ll_remove_at_head(&connected_connectors);
+            drmModeFreeConnector(drm_connector->connector);
+            break;
+        }
+        case DRM_MODE_DISCONNECTED:      log_infof("Disconnected"); break;
+        case DRM_MODE_UNKNOWNCONNECTION: log_infof("Unknown"); break;
+        }
+    }
+
+    log_infof("Planes:");
+
+    for (isize i = 0; i < plane_res->count_planes; i++) {
+        auto plane = drmModeGetPlane(fd, plane_res->planes[i]);
+        auto properties = drmModeObjectGetProperties(fd, plane_res->planes[i], DRM_MODE_OBJECT_PLANE);
+        defer(drmModeFreeObjectProperties(properties));
+
+        if (!properties) {
+            continue;
+        }
+
+        auto element   = arena_alloc<Drm_Plane>(temp.arena);
+        element->plane = plane;
+        ll_insert_at_head(&planes, element);
+
+        for (isize j = 0; j < properties->count_props; j++) {
+            auto property = drmModeGetProperty(fd, properties->props[j]);
+            defer(drmModeFreeProperty(property));
+
+            log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+
+            Drm_Plane_Property found_property = drm_property_name_map_find(drm_plane_property_name_map, ARRAY_SIZE(drm_plane_property_name_map), String{property->name});
+
+            if (found_property) {
+                element->properties[found_property] = property->prop_id;
+                log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
+            }
         }
     }
 }
