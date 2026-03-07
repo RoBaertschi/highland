@@ -3,6 +3,7 @@
 
 #include "utils.cpp"
 #include "arena.cpp"
+#include "map.cpp"
 #include "log.cpp"
 #include "drm.cpp"
 
