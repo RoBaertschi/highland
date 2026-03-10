@@ -11,6 +11,10 @@
     __builtin_trap();
 }
 
+struct String;
+
+internal void assert(b32 expression, String error);
+
 struct String {
     u8 const *ptr;
     isize    len;
@@ -18,6 +22,11 @@ struct String {
     String() = default;
     String(u8 const *ptr, isize len) : ptr(ptr), len(len) {};
     String(char const* str) : ptr(cast(u8 const *)str), len(strlen(str)) {}
+
+    u8 operator[](isize index) const {
+        ASSERT(0 <= index && index < len);
+        return ptr[index];
+    }
 
     bool operator ==(String const& other) {
         if (len != other.len) {
@@ -113,6 +122,16 @@ template <typename T>
 Slice<T> slice(Slice<T> s, isize start, isize end) {
     ASSERT(0 <= start && start <= end && end <= s.len);
     Slice<T> slice = {};
+    slice.len = end - start;
+    if (slice.len > 0) {
+        slice.ptr = s.ptr + start;
+    }
+    return slice;
+}
+
+String slice(String s, isize start, isize end) {
+    ASSERT(0 <= start && start <= end && end <= s.len);
+    String slice = {};
     slice.len = end - start;
     if (slice.len > 0) {
         slice.ptr = s.ptr + start;

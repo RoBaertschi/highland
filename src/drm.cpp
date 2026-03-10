@@ -1,14 +1,17 @@
+#include <drm.h>
+#include <drm/drm_fourcc.h>
 #include <errno.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <EGL/eglplatform.h>
+#include <fcntl.h>
+#include <gbm.h>
+#include <libseat.h>
 #include <libudev.h>
+#include <string.h>
 #include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include <drm.h>
-#include <drm/drm_fourcc.h>
-#include <string.h>
-#include <fcntl.h>
-#include <libseat.h>
-#include <gbm.h>
 
 #include "highland.hpp"
 
@@ -152,6 +155,9 @@ global Drm_Property_Name_Map_Value<Drm_Plane_Property> readonly drm_plane_proper
 struct Drm_Plane {
     Drm_Plane       *next;
     drmModePlanePtr plane;
+    u32             format;
+    gbm_surface     *surface;
+    EGLSurface      egl_surface;
     u32             properties[DRM_PLANE_PROPERTY__MAX];
     u64             property_values[DRM_PLANE_PROPERTY__MAX];
 };
@@ -220,6 +226,100 @@ internal Drm_Device *drm_find_gpus(udev *udev, Arena *arena) {
     }
 
     return start_device;
+}
+
+enum Drm_Egl_Extension {
+    DRM_EGL_EXTENSION_KHR_PLATFORM_GBM,
+    DRM_EGL_EXTENSION__MAX,
+};
+
+global String drm_egl_extensions[DRM_EGL_EXTENSION__MAX] = {
+    "EGL_KHR_platform_gbm",
+};
+
+struct Drm_Egl_Context {
+    EGLDisplay display;
+    EGLConfig  config;
+    EGLContext context;
+};
+
+internal Drm_Egl_Context drm_egl_init(gbm_device *device) {
+    String extensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    b8 found_extensions[DRM_EGL_EXTENSION__MAX] = {};
+
+    isize start_extension = 0;
+    for (isize i = 0; i < extensions.len; i++) {
+        u8 c = extensions[i];
+        if (c == ' ') {
+            auto extension_name = slice(extensions, start_extension, i);
+            start_extension = i+1;
+            for (usize extension = 0; extension < DRM_EGL_EXTENSION__MAX; extension++) {
+                if (drm_egl_extensions[extension] == extension_name) {
+                    if (!found_extensions[extension]) {
+                        found_extensions[extension] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    usize missing_extensions = 0;
+    for (usize extension = 0; extension < DRM_EGL_EXTENSION__MAX; extension++) {
+        if (!found_extensions[extension]) {
+            missing_extensions += 1;
+            log_errorf("Missing egl extension: {}", drm_egl_extensions[extension]);
+        }
+    }
+    if (missing_extensions > 0) {
+        log_fatalf("Missing some required egl extensions");
+    }
+
+    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    if (eglGetPlatformDisplayEXT == NULL) {
+        log_fatalf("Could not load eglGetPlatformDisplayEXT: {}", eglGetError());
+    }
+
+    auto display = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, device, NULL);
+    EGLint major = 0, minor = 0;
+    if (!eglInitialize(display, &major, &minor)) {
+        log_fatalf("Could not initialize egl: {}", eglGetError());
+    }
+
+    EGLint attribs[] = {
+        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
+        EGL_RED_SIZE,        8,
+        EGL_GREEN_SIZE,      8,
+        EGL_BLUE_SIZE,       8,
+        EGL_ALPHA_SIZE,      8,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_NONE,
+    };
+    EGLConfig config = {};
+    EGLint config_count = 0;
+    if (!eglChooseConfig(display, attribs, &config, 1, &config_count)) {
+        log_fatalf("Could not choose egl config: {}", eglGetError());
+    }
+
+    if (config_count < 1) {
+        log_fatalf("Could not find any matching egl config: {}", eglGetError());
+    }
+
+    eglBindAPI(EGL_OPENGL_ES_API);
+    EGLint ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_NONE,
+    };
+
+    auto context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (!context) {
+        log_fatalf("Could not create egl context: {}", eglGetError());
+    }
+
+    return Drm_Egl_Context {
+        display,
+        config,
+        context,
+    };
 }
 
 internal void drm_do_stuff(Drm_Device &device) {
@@ -481,6 +581,24 @@ connector_err:
                 goto plane_err;
             }
 
+            if (false) {
+                if (element->properties[DRM_PLANE_PROPERTY_IN_FORMATS]) {
+                    log_fatalf("The Plane Property IN_FORMATS is currently not supported.");
+                }
+            } else {
+                for (isize i = 0; i < plane->count_formats; i++) {
+                    auto format = plane->formats[i];
+                    if (format == DRM_FORMAT_XRGB8888) {
+                        element->format = format;
+                    }
+                }
+
+                if (!element->format) {
+                    log_errorf("Could not find format for plane.");
+                    goto plane_err;
+                }
+            }
+
             auto crtc = ll_remove_at_head(&assigned_to_connector_crtcs);
             ll_insert_at_head(&finished_crtcs, crtc);
             crtc->primary_plane = element;
@@ -494,10 +612,39 @@ plane_err:
         drmModeFreePlane(drm_plane->plane);
     }
 
+    auto gbm = gbm_create_device(fd);
+    if (!gbm) {
+        log_fatalf("Could not create gbm device: {}", strerror(errno));
+    }
+    defer(gbm_device_destroy(gbm));
+
+    auto egl_context = drm_egl_init(gbm);
+
+    for (auto connector = connected_connectors; connector; connector = connector->next) {
+        auto crtc  = connector->crtc;
+        auto plane = crtc->primary_plane;
+        auto mode  = connector->connector->modes[connector->preferred_mode];
+        plane->surface = gbm_surface_create(gbm, cast(u32)mode.hdisplay, cast(u32)mode.vdisplay, plane->format, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+
+        if (!plane->surface) {
+            log_fatalf("Could not create gbm_surface: {}", strerror(errno));
+        }
+
+        plane->egl_surface = eglCreateWindowSurface(
+               egl_context.display,
+               egl_context.config,
+               (EGLNativeWindowType)plane->surface,
+               NULL);
+
+        if (!plane->egl_surface) {
+            log_fatalf("Could not create egl surface from gbm surface: {:x}", eglGetError());
+        }
+    }
+
     // do the initial atomic commit
     auto atomic_commit = drmModeAtomicAlloc();
     if (!atomic_commit) {
-        log_errorf("Could not allocate atomic commit.");
+        log_errorf("Could not allocate atomic commit");
         return;
     }
     defer (drmModeAtomicFree(atomic_commit));
@@ -515,6 +662,15 @@ plane_err:
         drmModeAtomicAddProperty(atomic_commit, connector->crtc->crtc->crtc_id,     connector->crtc->properties[DRM_CRTC_PROPERTY_ACTIVE],  cast(u64)1);
         drmModeAtomicAddProperty(atomic_commit, connector->connector->connector_id, connector->properties[DRM_CONNECTOR_PROPERTY_CRTC_ID],  cast(u64)connector->crtc->crtc->crtc_id);
     }
+}
+
+internal void drm_restore(int fd, Drm_Connector *connectors) {
+    for (auto connector = connectors; connector; connector = connector->next) {
+        auto crtc = connector->crtc;
+        drmModeSetCrtc(fd, crtc->crtc->crtc_id, crtc->crtc->buffer_id, crtc->crtc->x, crtc->crtc->y, &connector->connector->connector_id, 1, &crtc->crtc->mode);
+    }
+
+    drmDropMaster(fd);
 }
 
 // Returns errno on failiure and 0 on success
