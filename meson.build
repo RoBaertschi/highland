@@ -6,6 +6,8 @@ project(
   default_options : ['warning_level=3', 'cpp_std=c++11'],
 )
 
+egl_dep = dependency('egl', required: true)
+glesv2_dep = dependency('glesv2', required: true)
 dependencies = [
   dependency('wayland-server', required: true),
   dependency('libudev', required: true),
@@ -13,6 +15,8 @@ dependencies = [
   dependency('libseat', required: true),
   dependency('fmt', required: true),
   dependency('gbm', required: true),
+  egl_dep,
+  glesv2_dep,
 ]
 
 wayland_scanner = find_program('wayland-scanner', required: true)
