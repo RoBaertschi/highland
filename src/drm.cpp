@@ -152,6 +152,8 @@ global Drm_Property_Name_Map_Value<Drm_Plane_Property> readonly drm_plane_proper
 struct Drm_Plane {
     Drm_Plane       *next;
     drmModePlanePtr plane;
+    u32             format;
+    gbm_surface     *surface;
     u32             properties[DRM_PLANE_PROPERTY__MAX];
     u64             property_values[DRM_PLANE_PROPERTY__MAX];
 };
@@ -464,6 +466,7 @@ connector_err:
             defer(drmModeFreeProperty(property));
 
             Drm_Plane_Property found_property = drm_property_name_map_find(drm_plane_property_name_map, ARRAY_SIZE(drm_plane_property_name_map), String{property->name});
+            log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
 
             if (found_property) {
                 element->properties[found_property] = property->prop_id;
@@ -481,17 +484,60 @@ connector_err:
                 goto plane_err;
             }
 
+            u32 format = 0;
+
+            if (element->properties[DRM_PLANE_PROPERTY_IN_FORMATS]) {
+                auto blob = drmModeGetPropertyBlob(fd, element->property_values[DRM_PLANE_PROPERTY_IN_FORMATS]);
+                if (blob->length < cast(u32)sizeof(drm_format_modifier_blob)) {
+                    log_errorf("Plane IN_FORMATS blob not enough space for the drm_format_modifier_blob.");
+                    goto plane_err;
+                }
+
+                auto format_modifier = cast(drm_format_modifier_blob*)blob->data;
+
+                assert(false, "TODO: Implement handling of IN_FORMATS for planes");
+            } else {
+                for (isize i = 0; i < plane->count_formats; i++) {
+                    if (plane->formats[i] == DRM_FORMAT_XRGB8888) {
+                        format = plane->formats[i];
+                        log_infof("Found DRM_FORMAT_XRGB8888 at {}", i);
+                        break;
+                    }
+                }
+
+                if (!format) {
+                    log_fatalf("No supported format found for plane.");
+                }
+            }
+
+            element->format = format;
+
             auto crtc = ll_remove_at_head(&assigned_to_connector_crtcs);
             ll_insert_at_head(&finished_crtcs, crtc);
             crtc->primary_plane = element;
             continue;
         }
 
-        log_errorf("Missing TYPE={}, FB_ID={} or CRTC_ID={}", element->properties[DRM_PLANE_PROPERTY_TYPE], element->properties[DRM_PLANE_PROPERTY_FB_ID], element->properties[DRM_PLANE_PROPERTY_CRTC_ID]);
+        log_errorf("Missing TYPE={}, FB_ID={}, CRTC_ID={} or IN_FORMATS={}", element->properties[DRM_PLANE_PROPERTY_TYPE], element->properties[DRM_PLANE_PROPERTY_FB_ID], element->properties[DRM_PLANE_PROPERTY_CRTC_ID], element->properties[DRM_PLANE_PROPERTY_IN_FORMATS]);
 
 plane_err:
         auto drm_plane = ll_remove_at_head(&planes);
         drmModeFreePlane(drm_plane->plane);
+    }
+
+    auto gbm = gbm_create_device(fd);
+    defer(gbm_device_destroy(gbm));
+
+    for (auto connector = connected_connectors; connector; connector = connector->next) {
+        auto crtc      = connector->crtc;
+        auto plane     = crtc->primary_plane;
+        auto mode      = connector->connector->modes[connector->preferred_mode];
+        plane->surface = gbm_surface_create(
+                gbm,
+                cast(u32)mode.hdisplay,
+                cast(u32)mode.vdisplay,
+                plane->format,
+                GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     }
 
     // do the initial atomic commit
