@@ -111,7 +111,7 @@ struct Slice {
 };
 
 template <typename T>
-Slice<T> slice_from_raw(T *ptr, isize len) {
+internal Slice<T> slice_from_raw(T *ptr, isize len) {
     Slice<T> slice = {};
     slice.ptr = ptr;
     slice.len = len;
@@ -119,7 +119,7 @@ Slice<T> slice_from_raw(T *ptr, isize len) {
 }
 
 template <typename T>
-Slice<T> slice(Slice<T> s, isize start, isize end) {
+internal Slice<T> slice(Slice<T> s, isize start, isize end) {
     ASSERT(0 <= start && start <= end && end <= s.len);
     Slice<T> slice = {};
     slice.len = end - start;
@@ -129,7 +129,7 @@ Slice<T> slice(Slice<T> s, isize start, isize end) {
     return slice;
 }
 
-String slice(String s, isize start, isize end) {
+internal String slice(String s, isize start, isize end) {
     ASSERT(0 <= start && start <= end && end <= s.len);
     String slice = {};
     slice.len = end - start;
@@ -140,7 +140,7 @@ String slice(String s, isize start, isize end) {
 }
 
 template <typename T>
-isize slice_copy(Slice<T> to, Slice<T> from) {
+internal isize slice_copy(Slice<T> to, Slice<T> from) {
     isize n = to.len;
     if (to.len > from.len) {
         n = from.len;
@@ -152,7 +152,7 @@ isize slice_copy(Slice<T> to, Slice<T> from) {
 }
 
 template <typename T>
-isize slice_copy(Slice<T> to, Slice<T const> from) {
+internal isize slice_copy(Slice<T> to, Slice<T const> from) {
     isize n = to.len;
     if (to.len > from.len) {
         n = from.len;
@@ -164,12 +164,12 @@ isize slice_copy(Slice<T> to, Slice<T const> from) {
 }
 
 template <typename T>
-void slice_zero(Slice<T> slice) {
+internal void slice_zero(Slice<T> slice) {
     memset(slice.ptr, 0, slice.len * sizeof(T));
 }
 
 template <typename T>
-void ll_insert_at_head(T** head, T* new_element) {
+internal void ll_insert_at_head(T** head, T* new_element) {
     if (*head == NULL) {
         *head = new_element;
     } else {
@@ -179,20 +179,20 @@ void ll_insert_at_head(T** head, T* new_element) {
 }
 
 template <typename T>
-void ll_insert_after(T* where, T* new_element) {
+internal void ll_insert_after(T* where, T* new_element) {
     new_element->next = where;
     where->next       = new_element;
 }
 
 template <typename T>
-T* ll_remove_next(T* prev) {
+internal T* ll_remove_next(T* prev) {
     T* saved = prev->next;
     prev->next = prev->next->next;
     return saved;
 }
 
 template <typename T>
-T* ll_remove_at_head(T** head) {
+internal T* ll_remove_at_head(T** head) {
     if (*head == NULL) {
         return NULL;
     }
@@ -200,4 +200,65 @@ T* ll_remove_at_head(T** head) {
     T* saved = *head;
     *head = saved->next;
     return saved;
+}
+
+// An dynamic array with static backing data
+template <typename T>
+struct Alloc_Array {
+    isize    len;
+    Slice<T> data;
+
+    T& operator[](isize index) {
+        ASSERT(0 <= index && index < len);
+        return data.ptr[index];
+    }
+
+    T const operator[](isize index) const {
+        ASSERT(0 <= index && index < len);
+        return data.ptr[index];
+    }
+
+    T *begin() noexcept {
+        return data.ptr;
+    }
+
+    T *end() noexcept {
+        return data.ptr + len;
+    }
+};
+
+template <typename T>
+internal void alloc_array_init(Alloc_Array<T> *array, Slice<T> backing) {
+    *array = {
+        0,
+        backing,
+    };
+}
+
+template <typename T>
+internal Alloc_Array<T> alloc_array_create(Slice<T> backing) {
+    return {
+        0,
+        backing,
+    };
+}
+
+template <typename T>
+internal void alloc_array_push(Alloc_Array<T> *array, T item) {
+    if (likely(array->data.len > array->len)) {
+        array->data[array->len] = item;
+        array->len += 1;
+    } else {
+        // TODO(robin): should this fail or just be a no-op
+        assert(false, "Alloc Array out of space.");
+    }
+}
+
+template <typename T>
+internal void alloc_array_unordered_remove(Alloc_Array<T> *array, isize index) {
+    ASSERT(0 <= index && index < array->len);
+    if (array->len > 1) {
+        array[index] = array[array->len - 1];
+    }
+    array->len -= 1;
 }
