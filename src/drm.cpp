@@ -6,6 +6,7 @@
 #include <EGL/eglplatform.h>
 #include <fcntl.h>
 #include <gbm.h>
+#include <GLES3/gl3.h>
 #include <libseat.h>
 #include <libudev.h>
 #include <string.h>
@@ -158,6 +159,8 @@ struct Drm_Plane {
     u32             format;
     gbm_surface     *surface;
     EGLSurface      egl_surface;
+    u32             width;
+    u32             height;
     u32             properties[DRM_PLANE_PROPERTY__MAX];
     u64             property_values[DRM_PLANE_PROPERTY__MAX];
 };
@@ -320,6 +323,48 @@ internal Drm_Egl_Context drm_egl_init(gbm_device *device) {
         config,
         context,
     };
+}
+
+struct Drm_Gbm_Bo_Data {
+    int fd;
+    u32 fb_id;
+};
+
+internal void drm_gbm_bo_destroy_user_data(gbm_bo *bo, void *data) {
+    (void)bo;
+    auto bo_data = cast(Drm_Gbm_Bo_Data*)data;
+    drmModeRmFB(bo_data->fd, bo_data->fb_id);
+}
+
+internal u32 drm_gbm_get_fb_id(Arena *arena, int fd, gbm_bo *bo, Drm_Plane *plane) {
+    u32 fb_id = (u32)(uintptr)gbm_bo_get_user_data(bo);
+    if (fb_id) {
+        return fb_id;
+    }
+
+    u32 stride[4] = { gbm_bo_get_stride(bo) };
+    u32 handle[4] = { gbm_bo_get_handle(bo).u32 };
+    u32 offset[4] = { 0 };
+
+    int result = drmModeAddFB2(
+                fd,
+                plane->width,
+                plane->height,
+                DRM_FORMAT_XRGB8888,
+                handle,
+                stride,
+                offset,
+                &fb_id,
+                0);
+    if (result < 0) {
+        log_fatalf("Could not create new frame buffer: {}", strerror(-result));
+    }
+
+    auto data   = arena_alloc<Drm_Gbm_Bo_Data>(arena);
+    data->fd    = fd;
+    data->fb_id = fb_id;
+    gbm_bo_set_user_data(bo, data, drm_gbm_bo_destroy_user_data);
+    return fb_id;
 }
 
 internal void drm_do_stuff(Drm_Device &device) {
@@ -630,10 +675,12 @@ plane_err:
     auto egl_context = drm_egl_init(gbm);
 
     for (auto connector = connected_connectors; connector; connector = connector->next) {
-        auto crtc  = connector->crtc;
-        auto plane = crtc->primary_plane;
-        auto mode  = connector->connector->modes[connector->preferred_mode];
-        plane->surface = gbm_surface_create(gbm, cast(u32)mode.hdisplay, cast(u32)mode.vdisplay, plane->format, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        auto crtc      = connector->crtc;
+        auto plane     = crtc->primary_plane;
+        auto mode      = connector->connector->modes[connector->preferred_mode];
+        plane->width   = cast(u32)mode.hdisplay;
+        plane->height  = cast(u32)mode.vdisplay;
+        plane->surface = gbm_surface_create(gbm, plane->width, plane->height, plane->format, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 
         if (!plane->surface) {
             log_fatalf("Could not create gbm_surface: {}", strerror(errno));
@@ -648,29 +695,66 @@ plane_err:
         if (!plane->egl_surface) {
             log_fatalf("Could not create egl surface from gbm surface: {:x}", eglGetError());
         }
+
+        if (!eglMakeCurrent(egl_context.display, plane->egl_surface, plane->egl_surface, egl_context.context)) {
+            log_fatalf("Could not make egl context current: {:x}", eglGetError());
+        }
+
+        glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        eglSwapBuffers(egl_context.display, plane->egl_surface);
     }
 
     // do the initial atomic commit
-    auto atomic_commit = drmModeAtomicAlloc();
-    if (!atomic_commit) {
+    auto commit = drmModeAtomicAlloc();
+    if (!commit) {
         log_errorf("Could not allocate atomic commit");
         return;
     }
-    defer (drmModeAtomicFree(atomic_commit));
+    defer (drmModeAtomicFree(commit));
 
     for (auto connector = connected_connectors; connector; connector = connector->next) {
-        auto mode      = connector->connector[connector->preferred_mode];
+        auto mode      = connector->connector->modes[connector->preferred_mode];
         u32  mode_blob = 0;
         int success    = drmModeCreatePropertyBlob(fd, &mode, sizeof(mode), &mode_blob);
         if (0 < success) {
             log_errorf("Could not create property blob: {}", strerror(success));
             continue;
         }
+        auto crtc     = connector->crtc;
+        auto crtc_id  = crtc->crtc->crtc_id;
+        auto plane    = crtc->primary_plane;
+        auto plane_id = plane->plane->plane_id;
 
-        drmModeAtomicAddProperty(atomic_commit, connector->crtc->crtc->crtc_id,     connector->crtc->properties[DRM_CRTC_PROPERTY_MODE_ID], cast(u64)mode_blob);
-        drmModeAtomicAddProperty(atomic_commit, connector->crtc->crtc->crtc_id,     connector->crtc->properties[DRM_CRTC_PROPERTY_ACTIVE],  cast(u64)1);
-        drmModeAtomicAddProperty(atomic_commit, connector->connector->connector_id, connector->properties[DRM_CONNECTOR_PROPERTY_CRTC_ID],  cast(u64)connector->crtc->crtc->crtc_id);
+        auto bo = gbm_surface_lock_front_buffer(plane->surface);
+        auto fb_id = drm_gbm_get_fb_id(temp.arena, fd, bo, plane);
+
+        drmModeAtomicAddProperty(commit, connector->connector->connector_id, connector->properties[DRM_CONNECTOR_PROPERTY_CRTC_ID], cast(u64)crtc_id);
+
+        drmModeAtomicAddProperty(commit, crtc_id, connector->crtc->properties[DRM_CRTC_PROPERTY_MODE_ID], cast(u64)mode_blob);
+        drmModeAtomicAddProperty(commit, crtc_id, connector->crtc->properties[DRM_CRTC_PROPERTY_ACTIVE],  cast(u64)1);
+
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_FB_ID],   fb_id);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_ID], crtc_id);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_SRC_X],   0);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_SRC_Y],   0);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_SRC_W],   plane->width << 16);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_SRC_H],   plane->height << 16);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_X],  0);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_Y],  0);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_W],  plane->width);
+        drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_H],  plane->height);
+
+        log_debugf("Commit ready");
     }
+
+    int drm_commit_test_result = drmModeAtomicCommit(fd, commit, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+    if (drm_commit_test_result < 0) {
+        log_fatalf("Atomic test commit failed: {}", strerror(-drm_commit_test_result));
+    }
+
+    log_infof("Test commit was successfull");
 }
 
 internal void drm_restore(int fd, Drm_Connector *connectors) {
