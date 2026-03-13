@@ -364,51 +364,63 @@ internal u32 drm_gbm_get_fb_id(Arena *arena, int fd, gbm_bo *bo, Drm_Plane *plan
 }
 
 enum Drm_State_Result {
+    DRM_STATE_OK,
+    // Partial, meaning there are some small errors that generally can be ignored
+    DRM_STATE_PARTIAL,
     DRM_STATE_OPEN_FAILED,
     DRM_STATE_NO_KMS,
     DRM_STATE_NO_MASTER,
     DRM_STATE_NO_ATOMIC,
     DRM_STATE_NO_UNIVERSAL_PLANES,
+    DRM_STATE_OTHER_ERROR,
 };
 
 struct Drm_State {
     Slice<Drm_Connector> connectors;
     Slice<Drm_Crtc>      crtcs;
     Slice<Drm_Plane>     planes;
+    int                  fd;
     Drm_State_Result     result;
 };
 
-internal void drm_setup(Arena *arena, Drm_Device &device) {
+internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
+    Drm_State state = {};
+
     Arena_Temp temp = temp_get_guard(NULL, 0);
     char const *path = udev_device_get_devnode(device.device);
     int fd = open(path, O_RDWR, O_CLOEXEC);
     if (fd < 0) {
         log_errorf("Could not open device({}): {}", path, strerror(errno));
-        return;
+        state.result = DRM_STATE_OPEN_FAILED;
+        return state;
     }
     defer(close(fd));
 
     if (!drmIsKMS(fd)) {
         log_errorf("Device does not support kernel mode setting, which is requried for wayland.");
-        return;
+        state.result = DRM_STATE_NO_KMS;
+        return state;
     }
 
     int set_master_result = drmSetMaster(fd);
     if (set_master_result) {
         log_errorf("Could not set drm master: {}", strerror(errno));
-        return;
+        state.result = DRM_STATE_NO_MASTER;
+        return state;
     }
 
     int atomic_supported_result = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
     if (atomic_supported_result) {
         log_errorf("Atomic mode setting is not supported, which is currently requried: {}", strerror(errno));
-        return;
+        state.result = DRM_STATE_NO_ATOMIC;
+        return state;
     }
 
     int universal_planes_result = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
     if (universal_planes_result) {
         log_errorf("Universal planes not supported: {}", strerror(errno));
-        return;
+        state.result = DRM_STATE_NO_UNIVERSAL_PLANES;
+        return state;
     }
 
     log_infof("Opened {}", path);
@@ -594,11 +606,9 @@ connector_err:
     }
     crtcs.len = 0;
 
-    auto finished_crtcs = alloc_array_create(
-            arena_alloc_slice<Drm_Crtc>(arena, cast(isize)plane_res->count_planes));
-
     log_infof("Planes:");
 
+    isize crtcs_idx = 0;
     for (isize i = 0; i < plane_res->count_planes; i++) {
         auto plane = drmModeGetPlane(fd, plane_res->planes[i]);
         auto properties = drmModeObjectGetProperties(fd, plane_res->planes[i], DRM_MODE_OBJECT_PLANE);
@@ -661,9 +671,8 @@ connector_err:
             }
 
             alloc_array_push(&planes, element);
-            assigned_to_connector_crtcs[0].primary_plane = &planes[planes.len - 1];
-            alloc_array_push(&finished_crtcs, assigned_to_connector_crtcs[0]);
-            alloc_array_unordered_remove(&assigned_to_connector_crtcs, 0);
+            assigned_to_connector_crtcs[crtcs_idx].primary_plane = &planes[planes.len - 1];
+            crtcs_idx += 1;
             continue;
         }
 
@@ -713,7 +722,14 @@ plane_err:
         eglSwapBuffers(egl_context.display, plane->egl_surface);
     }
 
-    // do the initial atomic commit
+    state.fd         = fd;
+    state.crtcs      = slice(assigned_to_connector_crtcs.data, 0, crtcs_idx);
+    state.planes     = slice(planes.data, 0, planes.len);
+    state.connectors = slice(connected_connectors.data, 0, connected_connectors.len);
+    return state;
+}
+
+internal void drm_commit_test(Arena *arena, Drm_State &state) {
     auto commit = drmModeAtomicAlloc();
     if (!commit) {
         log_errorf("Could not allocate atomic commit");
@@ -721,10 +737,10 @@ plane_err:
     }
     defer (drmModeAtomicFree(commit));
 
-    for (auto connector : connected_connectors) {
+    for (auto connector : state.connectors) {
         auto mode      = connector.connector->modes[connector.preferred_mode];
         u32  mode_blob = 0;
-        int success    = drmModeCreatePropertyBlob(fd, &mode, sizeof(mode), &mode_blob);
+        int success    = drmModeCreatePropertyBlob(state.fd, &mode, sizeof(mode), &mode_blob);
         if (0 < success) {
             log_errorf("Could not create property blob: {}", strerror(success));
             continue;
@@ -735,7 +751,7 @@ plane_err:
         auto plane_id = plane->plane->plane_id;
 
         auto bo = gbm_surface_lock_front_buffer(plane->surface);
-        auto fb_id = drm_gbm_get_fb_id(temp.arena, fd, bo, plane);
+        auto fb_id = drm_gbm_get_fb_id(arena, state.fd, bo, plane);
 
         drmModeAtomicAddProperty(commit, connector.connector->connector_id, connector.properties[DRM_CONNECTOR_PROPERTY_CRTC_ID], cast(u64)crtc_id);
 
@@ -752,11 +768,9 @@ plane_err:
         drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_Y],  0);
         drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_W],  plane->width);
         drmModeAtomicAddProperty(commit, plane_id, plane->properties[DRM_PLANE_PROPERTY_CRTC_H],  plane->height);
-
-        log_debugf("Commit ready");
     }
 
-    int drm_commit_test_result = drmModeAtomicCommit(fd, commit, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+    int drm_commit_test_result = drmModeAtomicCommit(state.fd, commit, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
     if (drm_commit_test_result < 0) {
         log_fatalf("Atomic test commit failed: {}", strerror(-drm_commit_test_result));
     }
