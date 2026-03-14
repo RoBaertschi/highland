@@ -258,7 +258,7 @@ template <typename T>
 internal void alloc_array_unordered_remove(Alloc_Array<T> *array, isize index) {
     ASSERT(0 <= index && index < array->len);
     if (array->len > 1) {
-        array[index] = array[array->len - 1];
+        (*array)[index] = (*array)[array->len - 1];
     }
     array->len -= 1;
 }
