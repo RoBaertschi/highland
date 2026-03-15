@@ -5,11 +5,30 @@
 #include <unistd.h>
 #include <string.h>
 
+internal inline isize count_leading_zeros(u32 n) {
+    if (!n) {
+        return 32;
+    }
+    return cast(isize)__builtin_clz(n);
+}
+
+internal inline isize count_leading_zeros(u64 n) {
+    if (!n) {
+        return 64;
+    }
+    return cast(isize)__builtin_clzll(n);
+}
+
+internal inline isize count_ones(u32 n) {
+    return cast(isize)__builtin_popcount(n);
+}
+
 #define ASSERT(expr) assert((expr), #expr)
 
 [[noreturn]] internal void trap(void) {
     __builtin_trap();
 }
+
 
 struct String;
 
@@ -210,7 +229,7 @@ struct Alloc_Array {
 
     T& operator[](isize index) {
         ASSERT(0 <= index && index < len);
-        return data.ptr[index];
+        return *(&data.ptr[index]);
     }
 
     T const operator[](isize index) const {
@@ -244,10 +263,10 @@ internal Alloc_Array<T> alloc_array_create(Slice<T> backing) {
 }
 
 template <typename T>
-internal void alloc_array_push(Alloc_Array<T> *array, T item) {
-    if (likely(array->data.len > array->len)) {
-        array->data[array->len] = item;
-        array->len += 1;
+internal void alloc_array_push(Alloc_Array<T>& array, T item) {
+    if (likely(array.data.len > array.len)) {
+        array.data[array.len] = item;
+        array.len += 1;
     } else {
         // TODO(robin): should this fail or just be a no-op
         assert(false, "Alloc Array out of space.");
@@ -255,10 +274,46 @@ internal void alloc_array_push(Alloc_Array<T> *array, T item) {
 }
 
 template <typename T>
-internal void alloc_array_unordered_remove(Alloc_Array<T> *array, isize index) {
-    ASSERT(0 <= index && index < array->len);
-    if (array->len > 1) {
-        (*array)[index] = (*array)[array->len - 1];
+internal void alloc_array_unordered_remove(Alloc_Array<T>& array, isize index) {
+    ASSERT(0 <= index && index < array.len);
+    if (array.len > 1) {
+        array[index] = array[array.len - 1];
     }
-    array->len -= 1;
+    array.len -= 1;
+}
+
+// robin: algorithms
+
+
+// param bool sort_function(void *user_data, T lhs, T rhs); Should return true if lhs is smaller than rhs (<)
+template <typename T, typename F>
+internal void quick_sort(Slice<T> items, F sort_function, void *user_data) {
+    T temp = {};
+
+    if (items.len <= 1) {
+        // already sorted
+        return;
+    }
+
+    isize i = -1, j = 0;
+    isize pivot = items.len - 1;
+    for (; j < pivot; j++) {
+        if (sort_function(user_data, items[j], items[pivot])) {
+            i += 1;
+
+            // Use j + 1
+            temp = items[i];
+            items[i] = items[j];
+            items[j] = temp;
+        }
+    }
+
+    i += 1;
+    temp = items[i];
+    items[i] = items[pivot];
+    items[pivot] = temp;
+
+    quick_sort(slice(items, 0, i), sort_function, user_data);
+    quick_sort(slice(items, i + 1, items.len), sort_function, user_data);
+    return;
 }

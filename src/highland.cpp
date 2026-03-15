@@ -19,6 +19,7 @@ int main(int argc, char **argv) {
     for(auto device = devices; device != NULL; device = device->next) {
         log_infof("Device in list {}", device->path);
         auto state = drm_setup(&arena, *device);
+        defer(drm_state_destroy(state));
         drm_commit_test(&arena, state);
     }
 

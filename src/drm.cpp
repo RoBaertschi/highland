@@ -383,6 +383,46 @@ struct Drm_State {
     Drm_State_Result     result;
 };
 
+internal isize drm_find_ideal_available_mask_in_ref_counts(Slice<u8> ref_counts, u32 mask) {
+    auto crtcs = count_leading_zeros(mask);
+
+    u8 largest_ref_count = 0;
+    isize largest_idx = -1;
+    for (isize i = 0; i < crtcs; i++) {
+        u32 index_mask = 1 << (cast(u32)i);
+        if (!(mask & index_mask)) {
+            continue;
+        }
+
+        if (ref_counts[i] == 1) {
+            // Perfect match
+            return i;
+        }
+
+        if (ref_counts[i] > largest_ref_count) {
+            largest_ref_count = ref_counts[i];
+            largest_idx = i;
+        }
+    }
+
+    return largest_idx;
+}
+
+internal void drm_sort_by_least_compatible_mask(Slice<u8> indices, Slice<u32> masks) {
+    ASSERT(indices.len == masks.len);
+
+    for (isize i = 0; i < indices.len; i++) {
+        indices[i] = i;
+    }
+
+    quick_sort(indices, [](void *user_data, u8 lhs, u8 rhs) {
+        Slice<u32>& masks = *(cast(Slice<u32>*)user_data);
+        return count_ones(masks[lhs]) < count_ones(masks[rhs]);
+    }, &masks);
+}
+
+// for each 
+
 internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
     Drm_State state = {};
 
@@ -394,7 +434,6 @@ internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
         state.result = DRM_STATE_OPEN_FAILED;
         return state;
     }
-    defer(close(fd));
 
     if (!drmIsKMS(fd)) {
         log_errorf("Device does not support kernel mode setting, which is requried for wayland.");
@@ -432,7 +471,7 @@ internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
 
     auto crtcs = alloc_array_create(
             arena_alloc_slice<Drm_Crtc>(temp.arena, cast(isize)res->count_crtcs));
-    auto connected_connectors = alloc_array_create(
+    auto connectors = alloc_array_create(
             arena_alloc_slice<Drm_Connector>(arena, cast(isize)res->count_connectors));
     auto planes = alloc_array_create(
             arena_alloc_slice<Drm_Plane>(arena, cast(isize)plane_res->count_planes));
@@ -471,12 +510,12 @@ internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
 
             drmModeFreeCrtc(crtc);
         } else {
-            alloc_array_push(&crtcs, element);
+            alloc_array_push(crtcs, element);
         }
     }
 
     auto assigned_to_connector_crtcs = alloc_array_create(
-            arena_alloc_slice<Drm_Crtc>(temp.arena, res->count_connectors));
+            arena_alloc_slice<Drm_Crtc>(arena, res->count_connectors));
 
     for (isize i = 0; i < res->count_connectors; i++) {
         auto connector = drmModeGetConnector(fd, res->connectors[i]);
@@ -514,8 +553,8 @@ internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
                 auto crtc = &crtcs[i];
                 if ((1 << crtc->index) & possible_crtcs) {
                     possible_crtcs &= ~(1 << crtc->index);
-                    alloc_array_push(&assigned_to_connector_crtcs, crtcs[i]);
-                    alloc_array_unordered_remove(&crtcs, i);
+                    alloc_array_push(assigned_to_connector_crtcs, crtcs[i]);
+                    alloc_array_unordered_remove(crtcs, i);
                     i -= 1;
                     compatible_crtc = &assigned_to_connector_crtcs[assigned_to_connector_crtcs.len - 1];
                 }
@@ -585,7 +624,7 @@ internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
             }
 
             if (element.properties[DRM_CONNECTOR_PROPERTY_CRTC_ID]) {
-                alloc_array_push(&connected_connectors, element);
+                alloc_array_push(connectors, element);
                 break;
             }
 
@@ -634,13 +673,31 @@ connector_err:
                 log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
             }
         }
+        Drm_Plane_Property required_properties[] = {
+            DRM_PLANE_PROPERTY_FB_ID,
+            DRM_PLANE_PROPERTY_CRTC_ID,
+            DRM_PLANE_PROPERTY_SRC_X,
+            DRM_PLANE_PROPERTY_SRC_Y,
+            DRM_PLANE_PROPERTY_SRC_W,
+            DRM_PLANE_PROPERTY_SRC_H,
+            DRM_PLANE_PROPERTY_CRTC_X,
+            DRM_PLANE_PROPERTY_CRTC_Y,
+            DRM_PLANE_PROPERTY_CRTC_W,
+            DRM_PLANE_PROPERTY_CRTC_H,
+        };
 
-        if (element.properties[DRM_PLANE_PROPERTY_TYPE]
-                && element.properties[DRM_PLANE_PROPERTY_FB_ID]
-                && element.properties[DRM_PLANE_PROPERTY_CRTC_ID]) {
+        isize missing = 0;
+        for (isize j = 0; j < ARRAY_SIZE(required_properties); j++) {
+            if (!element.properties[required_properties[j]]) {
+                log_errorf("Missing property {} from plane", drm_property_name_map_find_by_name(drm_plane_property_name_map, ARRAY_SIZE(drm_plane_property_name_map), required_properties[j]));
+                missing += 1;
+            }
+        }
+
+        if (missing <= 0) {
 
             if (element.property_values[DRM_PLANE_PROPERTY_TYPE] != DRM_PLANE_TYPE_PRIMARY) {
-                log_errorf("Plane is not primary.");
+                log_debugf("Plane is not primary.");
                 goto plane_err;
             }
 
@@ -670,13 +727,11 @@ connector_err:
                 }
             }
 
-            alloc_array_push(&planes, element);
+            alloc_array_push(planes, element);
             assigned_to_connector_crtcs[crtcs_idx].primary_plane = &planes[planes.len - 1];
             crtcs_idx += 1;
             continue;
         }
-
-        log_errorf("Missing TYPE={}, FB_ID={}, CRTC_ID={} or IN_FORMATS={}", element.properties[DRM_PLANE_PROPERTY_TYPE], element.properties[DRM_PLANE_PROPERTY_FB_ID], element.properties[DRM_PLANE_PROPERTY_CRTC_ID], element.properties[DRM_PLANE_PROPERTY_IN_FORMATS]);
 
 plane_err:
         drmModeFreePlane(plane);
@@ -690,7 +745,7 @@ plane_err:
 
     auto egl_context = drm_egl_init(gbm);
 
-    for (auto connector : connected_connectors) {
+    for (auto connector : connectors) {
         auto crtc      = connector.crtc;
         auto plane     = crtc->primary_plane;
         auto mode      = connector.connector->modes[connector.preferred_mode];
@@ -725,7 +780,7 @@ plane_err:
     state.fd         = fd;
     state.crtcs      = slice(assigned_to_connector_crtcs.data, 0, crtcs_idx);
     state.planes     = slice(planes.data, 0, planes.len);
-    state.connectors = slice(connected_connectors.data, 0, connected_connectors.len);
+    state.connectors = slice(connectors.data, 0, connectors.len);
     return state;
 }
 
@@ -751,6 +806,10 @@ internal void drm_commit_test(Arena *arena, Drm_State &state) {
         auto plane_id = plane->plane->plane_id;
 
         auto bo = gbm_surface_lock_front_buffer(plane->surface);
+        if (!bo) {
+            log_errorf("Invalid bo {} for surface {}: {}", cast(void*)bo, cast(void*)plane->surface, strerror(errno));
+            continue;
+        }
         auto fb_id = drm_gbm_get_fb_id(arena, state.fd, bo, plane);
 
         drmModeAtomicAddProperty(commit, connector.connector->connector_id, connector.properties[DRM_CONNECTOR_PROPERTY_CRTC_ID], cast(u64)crtc_id);
@@ -785,6 +844,12 @@ internal void drm_restore(int fd, Slice<Drm_Connector> connectors) {
     }
 
     drmDropMaster(fd);
+    close(fd);
+}
+
+internal void drm_state_destroy(Drm_State& state) {
+    drm_restore(state.fd, state.connectors);
+    close(state.fd);
 }
 
 // Returns errno on failiure and 0 on success
