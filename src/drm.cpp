@@ -333,7 +333,7 @@ internal void drm_gbm_bo_destroy_user_data(gbm_bo *bo, void *data) {
 }
 
 internal u32 drm_gbm_get_fb_id(Arena *arena, int fd, gbm_bo *bo, Drm_Plane *plane) {
-    u32 fb_id = (u32)(uintptr)gbm_bo_get_user_data(bo);
+    u32 fb_id = cast(u32)cast(uintptr)gbm_bo_get_user_data(bo);
     if (fb_id) {
         return fb_id;
     }
@@ -419,6 +419,51 @@ internal void drm_sort_by_least_compatible_mask(Slice<u8> indices, Slice<u32> ma
         Slice<u32>& masks = *(cast(Slice<u32>*)user_data);
         return count_ones(masks[lhs]) < count_ones(masks[rhs]);
     }, &masks);
+}
+
+internal Slice<Drm_Connector> drm_get_valid_connectors(Arena *arena, int fd, drmModeResourcesPtr res) {
+    auto connectors = arena_alloc_slice<Drm_Connector>(arena, res->count_connectors);
+
+    for (isize i = 0; i < res->count_connectors; i++) {
+        auto connector drmModeGetConnector(fd, res->connectors[i]);
+        if (connector->connection != DRM_MODE_CONNECTED) {
+            drmModeFreeConnector(connector);
+            continue;
+        }
+
+        auto properties = drmModeObjectGetProperties(fd, res->connectors[i], DRM_MODE_OBJECT_CONNECTOR);
+        defer(drmModeFreeObjectProperties(properties));
+
+        if (!properties) {
+            continue;
+        }
+
+        Drm_Connector element = {};
+
+        for (isize j = 0; j < properties->count_props; j++) {
+            auto property = drmModeGetProperty(fd, properties->props[j]);
+            defer(drmModeFreeProperty(property));
+            log_infof("--> p: {} = {}", property->name, properties->prop_values[j]);
+
+            Drm_Connector_Property found_property = drm_property_name_map_find(drm_connector_property_name_map, ARRAY_SIZE(drm_connector_property_name_map), String{property->name});
+
+            if (found_property) {
+                element.properties[found_property] = property->prop_id;
+                element.property_values[found_property] = properties->prop_values[j];
+                log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
+            }
+        }
+
+        if (element.properties[DRM_CONNECTOR_PROPERTY_CRTC_ID]) {
+            alloc_array_push(connectors, element);
+            continue;
+        }
+
+        log_errorf("Missing CRTC_ID");
+        drmModeFreeConnector(connector);
+    }
+
+    return connectors;
 }
 
 // for each 
