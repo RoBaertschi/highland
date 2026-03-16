@@ -421,11 +421,11 @@ internal void drm_sort_by_least_compatible_mask(Slice<u8> indices, Slice<u32> ma
     }, &masks);
 }
 
-internal Slice<Drm_Connector> drm_get_valid_connectors(Arena *arena, int fd, drmModeResourcesPtr res) {
-    auto connectors = arena_alloc_slice<Drm_Connector>(arena, res->count_connectors);
+internal Alloc_Array<Drm_Connector> drm_get_valid_connectors(Arena *arena, int fd, drmModeResPtr res) {
+    auto connectors = alloc_array_create(arena_alloc_slice<Drm_Connector>(arena, res->count_connectors));
 
     for (isize i = 0; i < res->count_connectors; i++) {
-        auto connector drmModeGetConnector(fd, res->connectors[i]);
+        auto connector = drmModeGetConnector(fd, res->connectors[i]);
         if (connector->connection != DRM_MODE_CONNECTED) {
             drmModeFreeConnector(connector);
             continue;
@@ -464,6 +464,65 @@ internal Slice<Drm_Connector> drm_get_valid_connectors(Arena *arena, int fd, drm
     }
 
     return connectors;
+}
+
+internal Alloc_Array<Drm_Plane> drm_get_planes(Arena *arena, int fd, drmModePlaneResPtr plane_res) {
+    auto planes = alloc_array_create(arena_alloc_slice<Drm_Plane>(arena, plane_res->count_planes));
+    for (isize i = 0; i < plane_res->count_planes; i++) {
+        auto plane = drmModeGetPlane(fd, plane_res->planes[i]);
+        auto properties = drmModeObjectGetProperties(fd, plane_res->planes[i], DRM_MODE_OBJECT_PLANE);
+        defer(drmModeFreeObjectProperties(properties));
+
+        if (!properties) {
+            continue;
+        }
+
+        Drm_Plane element   = {};
+        element.plane = plane;
+
+        for (isize j = 0; j < properties->count_props; j++) {
+            auto property = drmModeGetProperty(fd, properties->props[j]);
+            defer(drmModeFreeProperty(property));
+
+            Drm_Plane_Property found_property = drm_property_name_map_find(
+                drm_plane_property_name_map,
+                ARRAY_SIZE(drm_plane_property_name_map), String{property->name});
+            log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
+
+            if (found_property) {
+                element.properties[found_property] = property->prop_id;
+                element.property_values[found_property] = properties->prop_values[j];
+                log_infof("---> p found: {} = {}", property->name, properties->prop_values[j]);
+            }
+        }
+        Drm_Plane_Property required_properties[] = {
+            DRM_PLANE_PROPERTY_FB_ID,
+            DRM_PLANE_PROPERTY_CRTC_ID,
+            DRM_PLANE_PROPERTY_SRC_X,
+            DRM_PLANE_PROPERTY_SRC_Y,
+            DRM_PLANE_PROPERTY_SRC_W,
+            DRM_PLANE_PROPERTY_SRC_H,
+            DRM_PLANE_PROPERTY_CRTC_X,
+            DRM_PLANE_PROPERTY_CRTC_Y,
+            DRM_PLANE_PROPERTY_CRTC_W,
+            DRM_PLANE_PROPERTY_CRTC_H,
+        };
+
+        isize missing = 0;
+        for (isize j = 0; j < ARRAY_SIZE(required_properties); j++) {
+            if (!element.properties[required_properties[j]]) {
+                log_errorf(
+                    "Missing property {} from plane",
+                    drm_property_name_map_find_by_name(drm_plane_property_name_map, ARRAY_SIZE(drm_plane_property_name_map), required_properties[j]));
+                missing += 1;
+            }
+        }
+
+        if (missing <= 0) {
+            alloc_array_push(planes, element);
+        }
+    }
+    return planes;
 }
 
 // for each 
