@@ -384,7 +384,7 @@ struct Drm_State {
 };
 
 internal isize drm_find_ideal_available_mask_in_ref_counts(Slice<u8> ref_counts, u32 mask) {
-    auto crtcs = count_leading_zeros(mask);
+    auto crtcs = cast(isize)(sizeof(mask) * 8) - count_leading_zeros(mask);
 
     u8 largest_ref_count = 0;
     isize largest_idx = -1;
@@ -525,7 +525,82 @@ internal Alloc_Array<Drm_Plane> drm_get_planes(Arena *arena, int fd, drmModePlan
     return planes;
 }
 
-// for each 
+internal void drm_choose_crtc(int fd, Alloc_Array<Drm_Crtc> crtcs,
+    Alloc_Array<Drm_Connector> connectors,
+    Alloc_Array<Drm_Plane> planes) {
+
+    auto temp = temp_get_guard(NULL, 0);
+    auto connector_refs = arena_alloc_slice<u8>(temp.arena, connectors.len);
+    auto connector_masks = alloc_array_create(
+        arena_alloc_slice<u32>(temp.arena, connectors.len));
+    for (auto connector : connectors) {
+        u32 possible_crtcs = 0;
+        for (isize j = 0; j < connector.connector->count_encoders; j++) {
+            auto encoder = drmModeGetEncoder(fd, connector.connector->encoders[j]);
+            defer (drmModeFreeEncoder(encoder));
+            possible_crtcs |= encoder->possible_crtcs;
+        }
+
+        alloc_array_push(connector_masks, possible_crtcs);
+
+        for (usize i = 0; i < sizeof(u32) * 8; i++) {
+            u32 set = possible_crtcs & (1 << i);
+            if (set) {
+                connector_refs[i] += 1;
+            }
+        }
+    }
+
+    auto plane_refs = arena_alloc_slice<u8>(temp.arena, planes.len);
+    auto plane_masks = alloc_array_create(
+        arena_alloc_slice<u32>(temp.arena, planes.len));
+    for (auto plane : planes) {
+        u32 possible_crtcs = plane.plane->possible_crtcs;
+        alloc_array_push(plane_masks, possible_crtcs);
+        for (usize i = 0; i < sizeof(u32) * 8; i++) {
+            u32 set = possible_crtcs & (1 << i);
+            if (set) {
+                plane_refs[i] += 1;
+            }
+        }
+    }
+
+    // remove crtcs not compatible with any primary plane
+    Alloc_Array<Drm_Crtc> compatible_crtcs = alloc_array_create(
+        arena_alloc_slice<Drm_Crtc>(temp.arena, crtcs.len));
+    for (auto crtc : crtcs) {
+        for (auto plane : planes) {
+            if (plane.plane->possible_crtcs & (1 << crtc.index)) {
+                alloc_array_push(compatible_crtcs, crtc);
+            }
+        }
+    }
+
+    auto connector_indices = arena_alloc_slice<u8>(temp.arena, connectors.len);
+    drm_sort_by_least_compatible_mask(connector_indices, slice(connector_masks));
+    auto plane_indices = arena_alloc_slice<u8>(temp.arena, planes.len);
+    drm_sort_by_least_compatible_mask(plane_indices, slice(plane_masks));
+
+    for (auto connector_index : connector_indices) {
+        auto& connector = connectors[connector_index];
+        isize ideal_crtc_index = drm_find_ideal_available_mask_in_ref_counts(connector_refs, connector_masks[connector_index]);
+
+        Drm_Crtc ideal_crtc = {};
+        b32 found_ideal_crtc = false;
+        for (auto crtc : compatible_crtcs) {
+            if (crtc.index == cast(u32)ideal_crtc_index) {
+                ideal_crtc = crtc;
+                found_ideal_crtc = true;
+                break;
+            }
+        }
+
+        if (!found_ideal_crtc) {
+            log_errorf("Could not find ideal crtc for connector");
+            continue;
+        }
+    }
+}
 
 internal Drm_State drm_setup(Arena *arena, Drm_Device &device) {
     Drm_State state = {};

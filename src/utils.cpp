@@ -282,6 +282,11 @@ internal void alloc_array_unordered_remove(Alloc_Array<T>& array, isize index) {
     array.len -= 1;
 }
 
+template <typename T>
+internal Slice<T> slice(Alloc_Array<T>& array) {
+    return slice(array.data, 0, array.len);
+}
+
 // robin: algorithms
 
 

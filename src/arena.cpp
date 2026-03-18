@@ -222,6 +222,28 @@ Slice<T> arena_alloc_slice(Arena *arena, isize len) {
     return slice_from_raw(data, data ? len : 0);
 }
 
+template <typename T>
+Slice<T> arena_clone_slice(Arena *arena, Slice<T const> slice) {
+    if (slice.len > 0) {
+        auto copy = arena_alloc_slice<T>(arena, slice.len);
+        slice_copy(copy, slice);
+        return copy;
+    }
+    
+    return {};
+}
+
+template <typename T>
+Slice<T> arena_clone_slice(Arena *arena, Slice<T> slice) {
+    if (slice.len > 0) {
+        auto copy = arena_alloc_slice<T>(arena, slice.len);
+        slice_copy(copy, slice);
+        return copy;
+    }
+    
+    return {};
+}
+
 String arena_clone_string(Arena *arena, Slice<u8> s) {
     auto copy = arena_alloc_slice<u8>(arena, s.len);
     if (copy.len > 0) {
